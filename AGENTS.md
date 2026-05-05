@@ -86,7 +86,7 @@ no new data — they serve read-only for migration purposes.
 
 ### 2.2 Adding a Capability
 
-**Step 1 — Intent (Beads):**
+**Step 1 — Intent (Beads, human maintainer only):**
 ```bash
 bd create "add <name> capability" --type cap-add
 bd update bd-<hash> --meta '{"cap": "<name>_cap", "version": "0.1.0"}'
@@ -99,7 +99,7 @@ mix capability.new <name>
 # generates capabilities/<name>_cap/ with required structure
 ```
 
-**Step 3 — Declare in caps.toml:**
+**Step 3 — Declare in caps.toml (human maintainer / CI only):**
 ```toml
 [[capability]]
 name    = "<name>_cap"
@@ -117,8 +117,7 @@ defmodule NameCap.Repo.Migrations.CreateNamespace do
   @namespace "<name>"   # MUST match capability name exactly
 
   def up do
-    CapabilityStorage.create_namespace(@namespace)
-    # then create tables using prefixed names: "<name>_<table>"
+    # The migration runner applies the tenant schema; tables use the capability prefix.
     create table(:"#{@namespace}_items") do
       add :id, :binary_id, primary_key: true
       # ...
@@ -127,7 +126,7 @@ defmodule NameCap.Repo.Migrations.CreateNamespace do
   end
 
   def down do
-    CapabilityStorage.archive_namespace(@namespace)
+    drop table(:"#{@namespace}_items")
   end
 end
 ```
@@ -139,7 +138,8 @@ bd close bd-<hash> --note "deployed in caps.lock sha:<git_sha>"
 
 ### 2.3 Modifying a Capability
 
-Every modification requires a Beads issue:
+Every modification requires a Beads issue. Capability state changes use
+human-created `cap-change` issues:
 ```bash
 bd create "change <name>: <what and why>" --type cap-change
 ```
@@ -209,18 +209,35 @@ TenantCapabilityRegistry.capable?(tenant_id :: String.t(), cap :: atom) :: boole
 
 # Tenant provisioning (creates / archives PostgreSQL schema for tenant)
 TenantProvisioner.provision(tenant_id :: String.t(), capabilities :: [atom]) :: :ok
-TenantProvisioner.deprovision(tenant_id :: String.t()) :: :ok | {:error, :has_active_data}
+TenantProvisioner.deprovision(tenant_id :: String.t(), opts :: keyword) :: :ok | {:error, :confirmation_required | :has_active_data}
 
 # Cross-capability messaging (no direct module calls between capabilities)
 CapabilityBus.emit(cap_name :: atom, event :: atom, payload :: map, tenant_id :: String.t()) :: :ok
 CapabilityBus.subscribe(cap_name :: atom, event :: atom) :: :ok
+
+# Configuration and secrets
+CapabilityConfig.register(cap_name :: atom, defaults :: map) :: :ok
+CapabilityConfig.get(cap_name :: atom) :: map
+CapabilityConfig.get(cap_name :: atom, tenant_id :: String.t()) :: map
+SecretsApi.get(cap_name :: atom, key :: atom) :: {:ok, term} | {:error, term}
+
+# Compliance
+DataDeletion.execute(tenant_id :: String.t(), user_id :: String.t()) :: {:ok, map} | {:error, term}
+
+defmodule CapabilityCompliance do
+  @callback delete_user_data(tenant_id :: String.t(), user_id :: String.t())
+    :: {:ok, non_neg_integer()} | {:error, term}
+
+  @callback export_user_data(tenant_id :: String.t(), user_id :: String.t())
+    :: {:ok, map()} | {:error, term}
+end
 ```
 
 **What the kernel MUST NOT contain:**
 - HTTP handlers
 - Business logic of any kind
 - Domain schemas
-- Direct database queries
+- Direct capability-domain database queries
 - Any `import` of a capability module
 
 If you are about to add something to the kernel that is not in the list above,
@@ -266,7 +283,8 @@ billing_payment_methods
 - Each migration must implement both `up` and `down`
 - Migrations are tenant-schema-agnostic — they define tables, not schemas
 - `TenantProvisioner.provision/2` runs pending migrations for a tenant at onboarding
-- `down` for the initial migration must call `CapabilityStorage.archive_namespace/2`
+- Capability removal archives the namespace via `mix capability.remove <name>`;
+  ordinary migration rollback should undo only the objects created by that migration
 
 Migration template:
 ```elixir
@@ -391,10 +409,29 @@ a corresponding Beads issue.
 | `cap-remove`  | Removing or deprecating a capability |
 | `cap-reuse`   | Upgrading a capability version (e.g. auth_cap v2→v3) |
 | `arch-change` | Modifying this AGENTS.md or kernel API |
+| `compliance`  | Documenting legal hold, deletion, export, or privacy exceptions |
 | `bug`         | Standard bug within a capability |
 | `task`        | Development task within a capability |
 
 ### 7.2 Commit message convention
+
+Use semantic commit format for every commit:
+
+```
+<type>(<scope>): <short imperative summary> [bd-<hash>]
+```
+
+Rules:
+- `type` describes the intent: `feat`, `fix`, `test`, `docs`, `refactor`,
+  `chore`, `cap`, or `arch`.
+- `scope` names the affected capability or subsystem, e.g. `billing_cap`,
+  `kernel`, `infra`, or `docs`.
+- Use imperative mood in the summary, e.g. "handle nil invoice date".
+- Keep the first line concise, ideally 72 characters or less.
+- Add a blank line and body when the reason, risk, migration, or rollback path
+  is not obvious from the summary.
+- Include a Beads reference when the change is tied to a Beads issue. Capability
+  state changes MUST include it.
 
 All commits that change capability state MUST reference the Beads issue:
 
@@ -622,8 +659,8 @@ TenantCapabilityRegistry.deactivate("tenant_abc", :reporting_cap)
 
 **Deprovisioning a tenant entirely:**
 ```elixir
-TenantProvisioner.deprovision("tenant_abc")
-# → requires explicit confirmation flag: deprovision("tenant_abc", confirm: true)
+TenantProvisioner.deprovision("tenant_abc", confirm: true)
+# → requires explicit confirmation flag
 # → archives schema tenant_abc → tenant_abc_archived_<timestamp>
 # → retention: 90 days, then DROP SCHEMA
 ```
@@ -643,7 +680,7 @@ defmodule MyApp.TenantCapabilityGuard do
 
     if TenantCapabilityRegistry.capable?(tenant_id, capability) do
       conn
-      |> assign(:storage_prefix, TenantProvisioner.prefix(tenant_id))
+      |> assign(:storage_prefix, CapabilityStorage.prefix(tenant_id))
     else
       conn |> send_resp(403, "capability not active for this tenant") |> halt()
     end
@@ -651,8 +688,9 @@ defmodule MyApp.TenantCapabilityGuard do
 end
 ```
 
-The `:storage_prefix` assign is then passed into every `CapabilityStorage.repo/2` call.
-Capabilities receive the prefix from the connection — they never look it up themselves.
+The `tenant_id` assign is passed into every `CapabilityStorage.repo/2` call.
+The `:storage_prefix` assign is used for Ecto queries. Capabilities receive both
+from the connection — they never look up tenant routing themselves.
 
 ### 12.4 Tenant capability events (audit table)
 
@@ -802,14 +840,19 @@ defmodule BillingCap.Gateways.Stub do
 end
 ```
 
-**Config selects the implementation:**
+**CapabilityConfig selects the implementation:**
 ```elixir
-# config/config.exs
-config :billing_cap, :payment_gateway, BillingCap.Gateways.Stub
+# capabilities/billing_cap/lib/billing_cap/application.ex
+CapabilityConfig.register(:billing_cap, %{
+  payment_gateway: BillingCap.Gateways.Stub
+})
 
-# config/prod.exs
-config :billing_cap, :payment_gateway, BillingCap.Gateways.Stripe
+# Capability code reads the merged config instead of Application.get_env/2.
+gateway = CapabilityConfig.get(:billing_cap) |> Map.fetch!(:payment_gateway)
 ```
+
+Production configuration sets `:payment_gateway` to `BillingCap.Gateways.Stripe`
+through the kernel-managed capability config layer.
 
 When the external provider changes their API, only the `Stripe` module changes.
 The capability business logic, the event schema, and the tests are untouched.
@@ -837,7 +880,7 @@ in the test pipeline. If `down` raises or is not implemented, the build fails.
 ```bash
 # Before deploying to prod:
 mix ecto.migrate                    # apply migrations
-mix capabilities.smoke_test         # run smoke tests against staging
+mix capabilities.smoke_test         # run smoke tests against the staging instance
 
 # If smoke tests fail — rollback:
 mix ecto.rollback --step 1          # per-capability rollback available
@@ -903,7 +946,8 @@ Capabilities do not configure their own exporters.
 2. Storage namespace size over time
 3. Event bus: emitted vs consumed events per minute
 
-**Health check endpoint** — kernel exposes `/health/capabilities` returning:
+**Health check endpoint** — the HTTP boundary exposes `/health/capabilities`
+using capability health data provided by the kernel:
 ```json
 {
   "billing_cap": { "status": "ok",      "latency_p99_ms": 12 },
@@ -944,8 +988,9 @@ def start(_type, _args) do
 end
 ```
 
-**Secrets** are never in config files, environment variables in source control,
-or Docker images. They are fetched at runtime from the secrets backend:
+**Application secrets** are never in config files, environment variables in
+source control, or Docker images. They are fetched at runtime from the secrets
+backend:
 
 ```elixir
 # kernel/lib/secrets_api.ex
@@ -953,6 +998,9 @@ SecretsApi.get(:billing_cap, :stripe_secret_key)
 # → fetches from Vault (local) or cloud secrets manager (prod)
 # → cached in memory with TTL, auto-rotated
 ```
+
+Disposable local bootstrap tokens for services like the Vault dev server are
+not application secrets and must not be reused outside local development.
 
 **Rules:**
 - Never call `System.get_env/1` in capability code. Use `SecretsApi.get/2` or
@@ -964,8 +1012,9 @@ SecretsApi.get(:billing_cap, :stripe_secret_key)
 
 ### 13.6 Data deletion and GDPR compliance
 
-Every capability that stores personal data MUST implement the
-`CapabilityCompliance` behaviour:
+Every capability MUST implement the `CapabilityCompliance` behaviour so the
+kernel can confirm compliance uniformly. Capabilities that do not store personal
+data return `{:ok, 0}` for deletion and an empty export map:
 
 ```elixir
 defmodule CapabilityCompliance do
@@ -1017,9 +1066,9 @@ local      → Docker Compose, mirrors prod topology exactly
 production → Cloud provider via Terraform/OpenTofu (IaC)
 ```
 
-There is no separate "staging" environment. Staging parity is achieved via
-`caps.toml` — a staging instance runs a subset of capabilities from the same
-`caps.lock` as production.
+There is no third topology for staging. A staging instance uses the production
+IaC shape with different variables and may run a subset of capabilities from
+the same `caps.lock` as production.
 
 **The cardinal rule:** if it works locally, it works in prod.
 This is only possible if local = production topology at the service level.
