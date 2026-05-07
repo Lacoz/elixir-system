@@ -4,9 +4,12 @@ defmodule EsKernel.Application do
 
   @impl Application
   def start(_type, _args) do
+    pubsub_conf = Application.fetch_env!(:es_kernel, :capability_pubsub_options)
+
     children =
       [
         EsKernel.Repo,
+        pubsub_child(pubsub_conf),
         {CapabilitySupervisor, []},
         {GrantRegistry.Server, []}
       ] ++ watcher_children()
@@ -20,5 +23,9 @@ defmodule EsKernel.Application do
     else
       []
     end
+  end
+
+  defp pubsub_child(options) when is_list(options) do
+    {Phoenix.PubSub, options}
   end
 end

@@ -7,4 +7,5 @@ config :logger, :console,
 
 config :es_kernel,
   caps_path: System.get_env("CAPS_MANIFEST_PATH", "caps.toml"),
-  caps_lock_path: System.get_env("CAPS_LOCK_PATH", "caps.lock")
+  caps_lock_path: System.get_env("CAPS_LOCK_PATH", "caps.lock"),
+  capability_pubsub_options: [name: EsKernel.PubSub]
