@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "elixir_system",
+  "project_id": "d6ef894a-5bcf-45bc-af0d-d83ab71d860d"
+}
