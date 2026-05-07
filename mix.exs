@@ -21,6 +21,10 @@ defmodule ElixirSystem.MixProject do
   end
 
   defp aliases do
-    [test: ["compile", "test"]]
+    [
+      setup: ["deps.get", "ecto.setup"],
+      "ecto.setup": ["ecto.create -r EsKernel.Repo", "ecto.migrate -r EsKernel.Repo"],
+      test: ["compile", "test"]
+    ]
   end
 end
