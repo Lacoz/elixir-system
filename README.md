@@ -7,14 +7,15 @@ Vault-compatible secrets, Prometheus, Grafana, and the app run through Podman.
 
 ## Current Status
 
-This repository currently contains the architectural contract and local setup
-entrypoints. The application scaffold still needs to be created:
+This repository currently contains the architectural contract, Makefile
+entrypoints, and local Podman Compose definitions under `infra/local/`.
+
+The application scaffold still needs to be created:
 
 - root `mix.exs`
 - `kernel/`
 - `capabilities/`
 - `config/`
-- `infra/local/compose.yml`
 
 ## Prerequisites
 
@@ -80,10 +81,13 @@ bd setup cursor
 
 ## Local Services
 
-Local services should live in:
+Compose and supporting config live under:
 
 ```text
-infra/local/compose.yml
+infra/local/
+  compose.yml
+  prometheus.yml
+  grafana/provisioning/
 ```
 
 Expected local endpoints:
