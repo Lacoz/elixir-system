@@ -1,5 +1,7 @@
 import Config
 
+config :es_kernel, enable_caps_watcher: true
+
 database_url =
   System.get_env("DATABASE_URL") || "postgresql://app:app@localhost:5432/app_dev"
 

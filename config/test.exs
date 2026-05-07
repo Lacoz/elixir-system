@@ -5,7 +5,8 @@ database_url =
 
 config :es_kernel,
   caps_path: "test/fixtures/minimal_caps.toml",
-  caps_lock_path: "test/fixtures/caps.lock.missing"
+  caps_lock_path: "test/fixtures/caps.lock.missing",
+  enable_caps_watcher: false
 
 config :es_kernel, EsKernel.Repo,
   url: database_url,
