@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Capabilities.Diffcheck do
 
   @shortdoc "Fail when git diff HEAD exceeds 100 add or 100 delete lines per file"
 
-  @skip ~r/^(_build\/|deps\/|\.beads\/|mix\.lock|caps\.lock|kernel\/priv\/repo\/migrations\/|test\/fixtures\/)/
+  @skip ~r/^(_build\/|deps\/|\.tickets\/|mix\.lock|caps\.lock|kernel\/priv\/repo\/migrations\/|test\/fixtures\/)/
 
   @impl Mix.Task
   def run(_) do

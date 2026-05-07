@@ -24,7 +24,7 @@ Required local tools:
 - Homebrew
 - Elixir, Erlang/OTP, and Mix
 - Podman with the `podman compose` subcommand
-- Beads CLI: `bd`
+- [ticket](https://github.com/wedow/ticket) CLI: `tk` (install: `brew tap wedow/tools && brew install ticket`)
 - OpenTofu: `tofu`
 
 Useful local CLIs:
@@ -71,11 +71,10 @@ Install Elixir dependencies and compile the umbrella projects:
 make setup
 ```
 
-Initialize Beads only when setting up the project issue database for the first time:
+Tickets live under `.tickets/` (git-backed). Install the CLI, then see `tk help`:
 
 ```bash
-bd init
-bd setup cursor
+brew tap wedow/tools && brew install ticket   # provides `ticket`; symlink `tk` per upstream README if desired
 ```
 
 ## Local Services
@@ -172,6 +171,7 @@ iex -S mix
 ├── kernel/                 # OTP app :es_kernel — registry, grants, storage API, Mix tasks
 ├── capabilities/
 ├── config/
+├── .tickets/               # markdown tickets ([ticket](https://github.com/wedow/ticket))
 ├── test/
 └── infra/
     └── local/
@@ -203,11 +203,11 @@ podman machine init
 podman machine start
 ```
 
-Check Beads:
+Check ticket CLI:
 
 ```bash
-bd --version
-bd ready
+tk ready
+# or: ticket ready
 ```
 
 Check local service containers:

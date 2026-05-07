@@ -42,7 +42,7 @@ defmodule GrantRegistry.Store do
         event: event,
         valid_until: Keyword.get(opts, :valid_until),
         granted_by: Keyword.get(opts, :granted_by, "system:kernel"),
-        beads_ref: Keyword.get(opts, :beads_ref)
+        ticket_ref: Keyword.get(opts, :ticket_ref)
       }
     ])
   end

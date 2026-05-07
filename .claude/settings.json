@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "command -v tk >/dev/null && tk help | head -n 24 || command -v ticket >/dev/null && ticket help | head -n 24 || true",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "command -v tk >/dev/null && tk help | head -n 24 || command -v ticket >/dev/null && ticket help | head -n 24 || true",
             "type": "command"
           }
         ],

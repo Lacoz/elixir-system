@@ -1,3 +1,9 @@
 # Example manifest (copy to caps.toml and edit; see AGENTS.md §5).
 schema = "1"
 kernel_min = "0.0.1"
+
+# [[capability]]
+# name = "example_cap"
+# version = "0.1.0"
+# ticket = "<ticket-id>"   # intent reference (see AGENTS.md §2.2)
+# status = "active"

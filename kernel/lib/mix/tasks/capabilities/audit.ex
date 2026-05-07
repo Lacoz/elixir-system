@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Capabilities.Audit do
 
   @requirements ["app.config"]
 
-  @shortdoc "Warn when capability rows lack beads linkage"
+  @shortdoc "Warn when capability rows lack ticket linkage"
 
   @impl Mix.Task
   def run(_) do
@@ -18,10 +18,10 @@ defmodule Mix.Tasks.Capabilities.Audit do
     Enum.each(List.wrap(Map.get(data, "capability", [])), fn row ->
       name = Map.get(row, "name")
 
-      if is_binary(Map.get(row, "beads")) do
+      if is_binary(Map.get(row, "ticket")) do
         :ok
       else
-        Mix.shell().error(["[audit] ", inspect(name), " missing beads ref"])
+        Mix.shell().error(["[audit] ", inspect(name), " missing ticket ref"])
       end
     end)
   end

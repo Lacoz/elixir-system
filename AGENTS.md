@@ -1,8 +1,8 @@
 # AGENTS.md — Architectural Contract
 
 > This document is the single source of truth for all development decisions.
-> It is immutable by default. Changes require an explicit Beads issue with
-> `type: arch-change` and approval from a human maintainer.
+> It is immutable by default. Changes require an explicit **ticket** (`tk`) with
+> `type: arch-change` (or equivalent tag) and approval from a human maintainer.
 > AI agents MUST read this file before any action in this repository.
 
 ---
@@ -26,7 +26,7 @@ Refactor before proceeding.
 ```
 /
 ├── AGENTS.md                  ← you are here (immutable contract)
-├── caps.toml                  ← declared capability surface (editable via Beads only)
+├── caps.toml                  ← declared capability surface (human/CI only; intent via tk)
 ├── caps.lock                  ← frozen production state (generated, never hand-edited)
 ├── kernel/                    ← immutable core, no business logic
 │   ├── lib/
@@ -48,7 +48,7 @@ Refactor before proceeding.
 │       ├── priv/migrations/   ← Ecto migrations scoped to this capability
 │       ├── test/
 │       └── mix.exs
-├── .beads/                    ← Beads DB (gitignored)
+├── .tickets/                  ← git-backed tickets ([ticket](https://github.com/wedow/ticket))
 └── .github/
     └── workflows/
         └── release.yml        ← runs mix capabilities.freeze before mix release
@@ -87,12 +87,12 @@ no new data — they serve read-only for migration purposes.
 
 ### 2.2 Adding a Capability
 
-**Step 1 — Intent (Beads):**
+**Step 1 — Intent (ticket):**
 ```bash
-bd create "add <name> capability" --type cap-add
-bd update bd-<hash> --meta '{"cap": "<name>_cap", "version": "0.1.0"}'
+tk create "add <name> capability" --type feature --tags cap-add
+# Put `<name>_cap` / semver details in the ticket body or `tk add-note`.
 ```
-The issue is the record of *why* this capability exists. Never skip this step.
+The ticket is the record of *why* this capability exists. Never skip this step.
 
 **Step 2 — Scaffold:**
 ```bash
@@ -105,7 +105,7 @@ mix capability.new <name>
 [[capability]]
 name    = "<name>_cap"
 version = "0.1.0"
-beads   = "bd-<hash>"   # links capability to its origin issue
+ticket  = "<ticket-id>"   # links capability to its origin ticket
 status  = "active"
 ```
 
@@ -133,16 +133,17 @@ defmodule NameCap.Repo.Migrations.CreateNamespace do
 end
 ```
 
-**Step 5 — Close Beads issue only after migration runs in CI:**
+**Step 5 — Close ticket only after migration runs in CI:**
 ```bash
-bd close bd-<hash> --note "deployed in caps.lock sha:<git_sha>"
+tk add-note <ticket-id> "deployed in caps.lock sha:<git_sha>"
+tk close <ticket-id>
 ```
 
 ### 2.3 Modifying a Capability
 
-Every modification requires a Beads issue:
+Every modification requires a ticket:
 ```bash
-bd create "change <name>: <what and why>" --type cap-change
+tk create "change <name>: <what and why>" --type feature --tags cap-change
 ```
 
 **Semver rules (enforced by `mix capabilities.check` in CI):**
@@ -168,7 +169,7 @@ name       = "<name>_cap"
 version    = "2.3.1"
 status     = "deprecated"
 removed_in = "next"
-beads      = "bd-<hash>"
+ticket     = "<ticket-id>"
 ```
 
 **Release N+1 — Remove:**
@@ -177,7 +178,7 @@ beads      = "bd-<hash>"
 # 2. Run: mix capability.remove <name>
 #    This iterates all active partitions, archives their <name>_* tables,
 #    verifies no dependents, then removes the OTP app from the build
-# 3. Commit with message: "cap(remove): <name>_cap [bd-<hash>]"
+# 3. Commit with message: "cap(remove): <name>_cap [<ticket-id>]"
 ```
 
 The capability tables are **archived per-partition schema, not deleted** for 90 days.
@@ -238,7 +239,7 @@ CapabilityBus.subscribe(cap :: atom, event :: atom) :: :ok
 - Any `import` of a capability module
 
 If you are about to add something to the kernel that is not in the list above,
-stop and create a Beads issue with `type: arch-change`.
+stop and create a ticket with `type: arch-change` (or tag `arch-change`).
 
 ---
 
@@ -336,7 +337,7 @@ kernel_min = "1.0.0"
 name       = "issues_cap"       # must match OTP application name
 version    = "1.4.2"            # semver, enforced by CI
 status     = "active"           # active | deprecated | (absent = not listed)
-beads      = "bd-a1b2"          # origin Beads issue
+ticket     = "tk-a1b2"           # origin ticket
 requires   = []                 # other capability names this depends on
 deprecated = false
 
@@ -344,7 +345,7 @@ deprecated = false
 name       = "billing_cap"
 version    = "0.3.0"
 status     = "active"
-beads      = "bd-c3d4"
+ticket     = "tk-c3d4"
 requires   = ["auth_cap"]       # CapabilityRegistry enforces this at start
 deprecated = false
 ```
@@ -353,7 +354,7 @@ deprecated = false
 - Only humans and CI may edit `caps.toml`.
 - AI agents may READ `caps.toml` to understand current surface.
 - Agents must NEVER write to `caps.toml` directly.
-  All manifest changes go through a Beads issue → human review → commit.
+  All manifest changes go through a ticket → human review → commit.
 
 ---
 
@@ -373,19 +374,19 @@ git_branch = "main"
 name    = "issues_cap"
 version = "1.4.2"
 hash    = "sha256:a3f8..."
-beads   = "bd-a1b2"
+ticket  = "tk-a1b2"
 
 [[capability]]
 name    = "billing_cap"
 version = "0.3.0"
 hash    = "sha256:c7d2..."
-beads   = "bd-c3d4"
+ticket  = "tk-c3d4"
 
 [[removed]]
 name       = "csv_export_cap"
 removed_at = "2026-03-12T08:00:00Z"
 removed_by = "ci/release#4310"
-beads      = "bd-e5f6"
+ticket     = "tk-e5f6"
 reason     = "replaced by reporting_cap"
 ```
 
@@ -395,12 +396,12 @@ and when.
 
 ---
 
-## 7. Beads Integration
+## 7. Ticket integration
 
-Beads is the coordination layer. Every change to capability state MUST have
-a corresponding Beads issue.
+[Ticket](https://github.com/wedow/ticket) (`tk`) is the coordination layer. Every change to capability state MUST have
+a corresponding ticket under `.tickets/`.
 
-### 7.1 Issue types for this project
+### 7.1 Intent labels / ticket conventions
 
 | Type          | When to use |
 |---------------|-------------|
@@ -414,15 +415,15 @@ a corresponding Beads issue.
 
 ### 7.2 Commit message convention
 
-All commits that change capability state MUST reference the Beads issue:
+All commits that change capability state MUST reference the ticket id:
 
 ```
-cap(add): billing_cap v0.1.0 [bd-c3d4]
-cap(change): auth_cap v2.1.0→v2.3.0 [bd-e7f8]
-cap(remove): csv_export_cap [bd-e5f6]
-cap(deprecate): csv_export_cap [bd-e5f6]
-arch: update kernel storage API [bd-xxxx]
-fix(billing_cap): handle nil invoice date [bd-yyyy]
+cap(add): billing_cap v0.1.0 [tk-c3d4]
+cap(change): auth_cap v2.1.0→v2.3.0 [tk-e7f8]
+cap(remove): csv_export_cap [tk-e5f6]
+cap(deprecate): csv_export_cap [tk-e5f6]
+arch: update kernel storage API [tk-xxxx]
+fix(billing_cap): handle nil invoice date [tk-yyyy]
 ```
 
 ### 7.3 Changeset size limit — HARD RULE
@@ -459,10 +460,10 @@ writing any code:
 "implement billing_cap invoice creation"
 
 # RIGHT — four commits, each ≤ 100 lines
-1. "feat(billing_cap): add Invoice schema and migration [bd-c3d4]"      (~60 lines)
-2. "feat(billing_cap): add InvoiceRepo CRUD functions [bd-c3d4]"        (~80 lines)
-3. "feat(billing_cap): add create_invoice business logic [bd-c3d4]"     (~70 lines)
-4. "test(billing_cap): invoice creation happy + error paths [bd-c3d4]"  (~90 lines)
+1. "feat(billing_cap): add Invoice schema and migration [tk-c3d4]"      (~60 lines)
+2. "feat(billing_cap): add InvoiceRepo CRUD functions [tk-c3d4]"        (~80 lines)
+3. "feat(billing_cap): add create_invoice business logic [tk-c3d4]"     (~70 lines)
+4. "test(billing_cap): invoice creation happy + error paths [tk-c3d4]"  (~90 lines)
 ```
 
 Each commit must pass the full CI suite independently — not just the final one.
@@ -488,10 +489,10 @@ The only valid exceptions are:
 - Auto-generated GraphQL / OpenAPI schema files
 
 Exception commits MUST include `[no-diffcheck]` in the message and a
-human must have approved the exception via a Beads issue comment before push.
+human must have approved the exception via a ticket comment before push.
 
 ```
-refactor(billing_cap): rename BillingCap.Inv → BillingCap.Invoice [bd-c3d4] [no-diffcheck]
+refactor(billing_cap): rename BillingCap.Inv → BillingCap.Invoice [tk-c3d4] [no-diffcheck]
 ```
 
 ### 7.4 Agent workflow
@@ -500,20 +501,21 @@ When an AI agent works on a task:
 
 ```bash
 # 1. Check what is unblocked
-bd ready
+tk ready
 
-# 2. Claim before starting
-bd update bd-<hash> --claim
+# 2. Start work
+tk start <ticket-id>
 
 # 3. Work...
 
 # 4. Close with reference
-bd close bd-<hash> --note "implemented in <commit_sha>"
+tk add-note <ticket-id> "implemented in <commit_sha>"
+tk close <ticket-id>
 ```
 
-Agents MUST NOT start work on a task that is not in `bd ready`.
+Agents MUST NOT start work on a task that is not in `tk ready`.
 Agents MUST NOT modify `caps.toml` or `caps.lock`.
-Agents MUST NOT create Beads issues of type `cap-*` or `arch-change`
+Agents MUST NOT create tickets of type `cap-*` or `arch-change`
 — these require human intent.
 Agents MUST plan commit decomposition before writing code when a task
 exceeds 100 lines — see section 7.3.
@@ -549,7 +551,7 @@ A capability not in `caps.lock` is **not compiled into the binary**.
 1. `mix capabilities.diffcheck` — **rejects commits > 100 lines** (hard rule, see 7.3)
 2. `mix capabilities.check` — semver consistency
 3. `mix test` — full test suite including capability integration tests
-4. `mix capabilities.audit` — every capability in caps.toml has a valid Beads issue
+4. `mix capabilities.audit` — every capability in caps.toml has a valid ticket id
 5. `mix dialyzer` — type checking
 6. `mix credo --strict` — style and code quality
 
@@ -626,14 +628,14 @@ threshold for capability code.
 ## 10. What AI Agents May and May Not Do
 
 ### Permitted without human approval
-- Implement tasks listed in `bd ready` within an existing capability
+- Implement tasks listed in `tk ready` within an existing capability
 - Write tests for existing capability code
 - Fix bugs within a capability's own namespace
 - Read any file in the repository
 - Run `mix test`, `mix dialyzer`, `mix credo`
-- Create Beads issues of type `bug` or `task`
+- Create tickets of type `bug` or `task`
 
-### Requires human approval (create Beads issue, wait for human to proceed)
+### Requires human approval (create a ticket, wait for human to proceed)
 - Any change to `AGENTS.md`
 - Any change to `caps.toml`
 - Any change to `kernel/`
@@ -645,7 +647,7 @@ threshold for capability code.
 - Writing to `caps.lock` (CI only)
 - Deleting migration files
 - Bypassing `CapabilityStorage` to access another capability's tables directly
-- Creating Beads issues of type `cap-add`, `cap-change`, `cap-remove`, `arch-change`
+- Creating tickets of type `cap-add`, `cap-change`, `cap-remove`, `arch-change`
 - Writing directly to `partition_events` or `grant_events` tables
 - Calling `PartitionProvisioner.deprovision/2` (destructive — human only)
 - Calling `GrantRegistry.grant/4` or `GrantRegistry.revoke/3` (operational — human only)
@@ -671,7 +673,7 @@ threshold for capability code.
 | **partition axis** | Data isolation boundaries provisioned in the system (governed by PartitionProvisioner) |
 | **principal axis** | Who can act and on which partitions (governed by GrantRegistry) |
 | **degrowth** | The deliberate, clean removal of a capability including its code, storage across all partitions, infra module, and intent record |
-| **Beads issue** | The unit of intent — records why a change was made, not just what |
+| **Ticket** | The unit of intent — records why a change was made, not just what |
 | **Gateway behaviour** | Elixir behaviour abstracting an external service, enabling swap without touching capability logic |
 | **event contract test** | Test in the consumer capability that validates the shape of events emitted by another capability |
 | **capability infra module** | Terraform module that provisions all cloud resources for one capability — applied on add, destroyed on remove |
@@ -755,7 +757,7 @@ defmodule Grant do
     permissions:  [atom],                 # e.g. [:read, :write] or [:audit]
     valid_until:  DateTime.t() | nil,     # nil = permanent
     granted_by:   String.t(),             # principal_id of granter
-    beads_ref:    String.t() | nil,       # optional Beads issue ref
+    ticket_ref:   String.t() | nil,       # optional ticket id
     inserted_at:  DateTime.t()
   }
 end
@@ -796,7 +798,7 @@ GrantRegistry.grant("project:gdpr_2026", :compliance_cap,
   permissions: [:audit],
   valid_until: ~U[2026-12-31 23:59:59Z],
   granted_by: "hq:group_admin",
-  beads_ref: "bd-gdpr26"
+  ticket_ref: "tk-gdpr26"
 )
 
 # Service account — SAP sync worker, single partition, single capability
@@ -917,7 +919,7 @@ CREATE TABLE grant_events (
   event        text        NOT NULL,  -- 'granted' | 'revoked' | 'expired'
   valid_until  timestamptz,
   granted_by   text,
-  beads_ref    text,
+  ticket_ref   text,
   inserted_at  timestamptz NOT NULL DEFAULT now()
 );
 ```
@@ -949,15 +951,15 @@ No manual intervention needed. When `project:gdpr_2026` reaches
 `2026-12-31 23:59:59Z`, all its grants expire automatically and every
 subsequent request returns 403.
 
-### 12.9 Three-axis model and Beads
+### 12.9 Three-axis model and tickets
 
 Grant operations (grant/revoke for a specific principal) do **not** require
-a Beads issue — they are operational.
+a ticket — they are operational.
 
-Partition provisioning and deprovisioning do **not** require a Beads issue —
+Partition provisioning and deprovisioning do **not** require a ticket —
 they are operational.
 
-Beads issues (`arch-change`) are required only when:
+Tickets tagged `arch-change` are required only when:
 - Changing the `GrantRegistry` or `GrantGuard` kernel API
 - Changing the `PartitionProvisioner` lifecycle
 - Changing the `Principal` type enum
@@ -1284,7 +1286,7 @@ The kernel provides `DataDeletion.execute(tenant_id, user_id)` which:
 - `export_user_data/2` must not include fields tagged `:internal` or `:derived`
   in the schema — only fields that were directly provided by the user.
 - Deletion is **hard delete by default**. Soft delete (anonymisation) is allowed
-  only when a legal hold is active and must be documented via a Beads issue with
+  only when a legal hold is active and must be documented via a ticket with
   type `compliance`.
 
 ---
@@ -1551,7 +1553,7 @@ Agents may:
 - Modify `infra/local/compose.yml` for local development needs
 - Add dashboard templates in `infra/local/grafana/dashboards/`
 - Modify `infra/modules/capability-infra/<name>/` for the capability they
-  are currently implementing (must be in `bd ready`)
+  are currently implementing (must be in `tk ready`)
 
 Agents must never:
 - Run `tofu apply` or `tofu destroy` — infra changes require human approval
@@ -1562,53 +1564,47 @@ Agents must never:
 ---
 
 *Document version: 1.5.0*
-*Last arch-change: docker→podman, Claude Code→AI agents [bd-infra02]*
+*Last arch-change: docker→podman, Claude Code→AI agents [tk-infra02]*
 *Maintained by: human maintainers only*
 *Agents: read-only*
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-## Beads Issue Tracker
+<!-- BEGIN TICKET INTEGRATION -->
+## Ticket CLI (`tk`)
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project uses **[ticket](https://github.com/wedow/ticket)** (`tk`) for issue tracking. Run `tk help` for commands.
 
-### Quick Reference
+### Quick reference
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+tk ready              # Unblocked open work
+tk show <id>          # View ticket
+tk start <id>         # In progress
+tk close <id>         # Done
+tk dep <id> <dep-id>  # Dependency edge
 ```
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Track coordination work with **`tk`** per §7 — do not use ad-hoc markdown TODOs in source instead of tickets.
+- Ticket files live under **`.tickets/`** and should be committed with related changes.
 
-## Session Completion
+## Session completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, complete the steps below. Work is not complete until **`git push`** succeeds.
 
-**MANDATORY WORKFLOW:**
+**Mandatory workflow:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+1. **File tickets** for remaining work (`tk create`).
+2. **Run quality gates** if code changed (tests, linters).
+3. **Close or update tickets** (`tk close`, `tk add-note`).
+4. **Push to remote:**
    ```bash
    git pull --rebase
-   bd dolt push
    git push
-   git status  # MUST show "up to date with origin"
+   git status   # MUST show "up to date with origin"
    ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+5. Clean up stashes / branches as needed.
 
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
+**Critical:** Do not stop before a successful push.
+
+<!-- END TICKET INTEGRATION -->

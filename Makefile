@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-REQUIRED_TOOLS := git brew elixir erl mix podman bd tofu
+REQUIRED_TOOLS := git brew elixir erl mix podman tofu
 OPTIONAL_TOOLS := psql vault
 
 .PHONY: doctor install-tools versions setup dev dev-down test check
@@ -20,6 +20,12 @@ doctor:
 		printf "OK       %s\n" "podman compose"; \
 	else \
 		printf "MISSING  %s\n" "podman compose"; \
+		missing=1; \
+	fi; \
+	if command -v tk >/dev/null 2>&1 || command -v ticket >/dev/null 2>&1; then \
+		printf "OK       %s\n" "tk/ticket"; \
+	else \
+		printf "MISSING  %s\n" "tk (brew tap wedow/tools && brew install ticket)"; \
 		missing=1; \
 	fi; \
 	echo ""; \
@@ -45,7 +51,7 @@ install-tools:
 	@command -v elixir >/dev/null 2>&1 || brew install elixir
 	@command -v podman >/dev/null 2>&1 || brew install podman
 	@podman compose version >/dev/null 2>&1 || brew install podman-compose
-	@command -v bd >/dev/null 2>&1 || brew install beads
+	@command -v tk >/dev/null 2>&1 || command -v ticket >/dev/null 2>&1 || { brew tap wedow/tools && brew install ticket; }
 	@command -v tofu >/dev/null 2>&1 || brew install opentofu
 	@command -v psql >/dev/null 2>&1 || brew install postgresql@16
 	@command -v vault >/dev/null 2>&1 || { \
@@ -58,7 +64,7 @@ versions:
 	@erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().' -noshell
 	@podman --version
 	@podman compose version
-	@bd --version
+	@{ command -v tk >/dev/null && tk help 2>/dev/null | head -n 1; } || { command -v ticket >/dev/null && ticket help 2>/dev/null | head -n 1; } || true
 	@tofu version
 	@command -v psql >/dev/null 2>&1 && psql --version || true
 	@command -v vault >/dev/null 2>&1 && vault version || true

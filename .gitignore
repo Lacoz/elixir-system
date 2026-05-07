@@ -4,7 +4,9 @@
 erl_crash.dump
 
 
-# Beads / Dolt files (added by bd init)
+# Legacy local DB junk
 .dolt/
 *.db
-.beads-credential-key
+
+# Legacy Beads workspace (removed — use ticket / `.tickets/` instead)
+.beads/

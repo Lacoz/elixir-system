@@ -1,0 +1,27 @@
+---
+description: Ticket CLI (tk) — intent tracking per AGENTS.md
+alwaysApply: true
+---
+
+# Ticket issue tracking
+
+This project uses [ticket](https://github.com/wedow/ticket) (`tk`) for issue tracking — markdown files under `.tickets/`.
+
+## Rules
+
+- Track coordination work with `tk` per **`AGENTS.md`** §7 (never replace intent records with ad-hoc markdown TODOs in source files).
+- Run `tk help` when you need command syntax.
+- Commit ticket changes with related code when applicable.
+
+## Quick reference
+
+```bash
+tk ready              # Work without unresolved deps
+tk create "title"     # New ticket (prints ID)
+tk start <id>         # Mark in progress
+tk close <id>         # Complete
+tk show <id>          # Details
+tk dep <id> <dep-id>  # Dependency: id blocks until dep-id closes
+```
+
+See https://github.com/wedow/ticket for install (`brew tap wedow/tools && brew install ticket`) and migration from legacy trackers.
