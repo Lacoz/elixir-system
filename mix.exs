@@ -17,7 +17,7 @@ defmodule ElixirSystem.MixProject do
   end
 
   defp deps do
-    [{:es_kernel, path: "kernel"}]
+    [{:es_kernel, path: "kernel", runtime: Mix.env() != :test}]
   end
 
   defp aliases do

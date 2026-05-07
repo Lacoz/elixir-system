@@ -4,6 +4,11 @@ defmodule EsKernel.Application do
 
   @impl Application
   def start(_type, _args) do
-    Supervisor.start_link([EsKernel.Repo], strategy: :one_for_one, name: EsKernel.Supervisor)
+    children = [
+      EsKernel.Repo,
+      {GrantRegistry.Server, []}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: EsKernel.Supervisor)
   end
 end
