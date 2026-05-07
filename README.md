@@ -12,10 +12,9 @@ entrypoints, local Podman Compose definitions under `infra/local/`, and a minima
 Mix project: the `:es_kernel` OTP application lives under [`kernel/`](kernel/)
 and is pulled in from the root [`mix.exs`](mix.exs).
 
-Capability surface and OTP apps beyond the bare kernel shell still need work:
-
-- `capabilities/` directories and capability OTP apps
-- `caps.toml` / `caps.lock` (manifest; human/CI edits only)
+Kernel modules include `CapabilityStorage`, grant/partition scaffolding, PubSub-backed
+`CapabilityBus`, Mix tasks under `mix capabilities.*`, and a dev-only `caps.toml`
+watcher. Human maintainers still own `caps.toml` / `caps.lock` edits.
 
 ## Prerequisites
 
@@ -121,20 +120,40 @@ make dev-down
 
 ## Daily Development
 
-Typical loop after the scaffold exists:
+Copy the starter manifest once (maintainers evolve it deliberately; agents never ship
+committed `caps.toml` / `caps.lock`):
+
+```bash
+cp caps.toml.example caps.toml
+```
+
+Run database migrations locally (PostgreSQL must be reachable via `DATABASE_URL`):
+
+```bash
+mix setup
+```
+
+Wire `DATABASE_URL`, then start dependencies and the supervision tree:
 
 ```bash
 make dev
-make test
 ```
 
-Run the local verification suite:
+Run the regression suite plus manifest/diff guards:
 
 ```bash
 make check
 ```
 
-Run the app:
+Run-only compile/tests without infra:
+
+```bash
+mix compile
+CAPS_MANIFEST_PATH=caps.toml.example mix capabilities.check
+mix test
+```
+
+Interactive console against the umbrella:
 
 ```bash
 iex -S mix
@@ -148,9 +167,9 @@ iex -S mix
 ├── README.md
 ├── Makefile
 ├── mix.exs                 # meta project; depends on kernel via path
-├── caps.toml             # (planned) declared capability surface
-├── caps.lock             # (planned) frozen production manifest
-├── kernel/               # OTP app :es_kernel — shell only for now
+├── caps.toml.example       # starter manifest (copy locally to caps.toml)
+├── caps.toml / caps.lock   # real manifests (maintainer-authored, usually gitignored)
+├── kernel/                 # OTP app :es_kernel — registry, grants, storage API, Mix tasks
 ├── capabilities/
 ├── config/
 ├── test/

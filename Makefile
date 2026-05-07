@@ -76,7 +76,9 @@ dev-down:
 test:
 	mix test
 
-# mix capabilities.check and credo are added once those tasks/deps exist in this repo.
 check:
 	mix compile
+	CAPS_MANIFEST_PATH=caps.toml.example mix capabilities.check
+	CAPS_MANIFEST_PATH=caps.toml.example mix capabilities.audit
 	mix test
+	mix capabilities.diffcheck
