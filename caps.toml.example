@@ -1,0 +1,3 @@
+# Example manifest (copy to caps.toml and edit; see AGENTS.md §5).
+schema = "1"
+kernel_min = "0.0.1"
