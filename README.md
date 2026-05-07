@@ -8,14 +8,14 @@ Vault-compatible secrets, Prometheus, Grafana, and the app run through Podman.
 ## Current Status
 
 This repository currently contains the architectural contract, Makefile
-entrypoints, and local Podman Compose definitions under `infra/local/`.
+entrypoints, local Podman Compose definitions under `infra/local/`, and a minimal
+Mix project: the `:es_kernel` OTP application lives under [`kernel/`](kernel/)
+and is pulled in from the root [`mix.exs`](mix.exs).
 
-The application scaffold still needs to be created:
+Capability surface and OTP apps beyond the bare kernel shell still need work:
 
-- root `mix.exs`
-- `kernel/`
-- `capabilities/`
-- `config/`
+- `capabilities/` directories and capability OTP apps
+- `caps.toml` / `caps.lock` (manifest; human/CI edits only)
 
 ## Prerequisites
 
@@ -66,7 +66,7 @@ make install-tools
 make doctor
 ```
 
-Once the Elixir project scaffold exists, install dependencies and run migrations:
+Install Elixir dependencies and compile the umbrella projects:
 
 ```bash
 make setup
@@ -147,10 +147,10 @@ iex -S mix
 ├── AGENTS.md
 ├── README.md
 ├── Makefile
-├── mix.exs
-├── caps.toml
-├── caps.lock
-├── kernel/
+├── mix.exs                 # meta project; depends on kernel via path
+├── caps.toml             # (planned) declared capability surface
+├── caps.lock             # (planned) frozen production manifest
+├── kernel/               # OTP app :es_kernel — shell only for now
 ├── capabilities/
 ├── config/
 ├── test/

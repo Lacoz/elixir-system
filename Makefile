@@ -65,7 +65,7 @@ versions:
 
 setup: doctor
 	mix deps.get
-	mix ecto.migrate
+	mix compile
 
 dev:
 	podman compose -f infra/local/compose.yml up
@@ -76,7 +76,7 @@ dev-down:
 test:
 	mix test
 
+# mix capabilities.check and credo are added once those tasks/deps exist in this repo.
 check:
-	mix capabilities.check
+	mix compile
 	mix test
-	mix credo --strict
