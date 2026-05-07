@@ -3,7 +3,7 @@
 > This document is the single source of truth for all development decisions.
 > It is immutable by default. Changes require an explicit Beads issue with
 > `type: arch-change` and approval from a human maintainer.
-> Agents MUST read this file before any action in this repository.
+> AI agents MUST read this file before any action in this repository.
 
 ---
 
@@ -32,11 +32,12 @@ Refactor before proceeding.
 │   ├── lib/
 │   │   ├── capability_supervisor.ex
 │   │   ├── capability_registry.ex
-│   │   ├── capability_watcher.ex         ← dev-only file watcher
+│   │   ├── capability_watcher.ex       ← dev-only file watcher
 │   │   ├── storage_api.ex
-│   │   ├── tenant_capability_registry.ex ← which tenant has what active
-│   │   ├── tenant_capability_guard.ex    ← plug: enforces per-request access
-│   │   └── tenant_provisioner.ex         ← creates/archives tenant schemas
+│   │   ├── partition_provisioner.ex    ← creates/archives PostgreSQL schemas
+│   │   ├── grant_registry.ex          ← principal × [partitions] × caps × perms
+│   │   ├── grant_guard.ex             ← plug: resolves + enforces grants per request
+│   │   └── principal.ex               ← principal types: user/team/project/service
 │   └── mix.exs
 ├── capabilities/              ← one directory per capability
 │   └── <name>_cap/
@@ -86,7 +87,7 @@ no new data — they serve read-only for migration purposes.
 
 ### 2.2 Adding a Capability
 
-**Step 1 — Intent (Beads, human maintainer only):**
+**Step 1 — Intent (Beads):**
 ```bash
 bd create "add <name> capability" --type cap-add
 bd update bd-<hash> --meta '{"cap": "<name>_cap", "version": "0.1.0"}'
@@ -99,7 +100,7 @@ mix capability.new <name>
 # generates capabilities/<name>_cap/ with required structure
 ```
 
-**Step 3 — Declare in caps.toml (human maintainer / CI only):**
+**Step 3 — Declare in caps.toml:**
 ```toml
 [[capability]]
 name    = "<name>_cap"
@@ -117,7 +118,8 @@ defmodule NameCap.Repo.Migrations.CreateNamespace do
   @namespace "<name>"   # MUST match capability name exactly
 
   def up do
-    # The migration runner applies the tenant schema; tables use the capability prefix.
+    CapabilityStorage.create_namespace(@namespace)
+    # then create tables using prefixed names: "<name>_<table>"
     create table(:"#{@namespace}_items") do
       add :id, :binary_id, primary_key: true
       # ...
@@ -126,7 +128,7 @@ defmodule NameCap.Repo.Migrations.CreateNamespace do
   end
 
   def down do
-    drop table(:"#{@namespace}_items")
+    CapabilityStorage.archive_namespace(@namespace)
   end
 end
 ```
@@ -138,8 +140,7 @@ bd close bd-<hash> --note "deployed in caps.lock sha:<git_sha>"
 
 ### 2.3 Modifying a Capability
 
-Every modification requires a Beads issue. Capability state changes use
-human-created `cap-change` issues:
+Every modification requires a Beads issue:
 ```bash
 bd create "change <name>: <what and why>" --type cap-change
 ```
@@ -174,14 +175,14 @@ beads      = "bd-<hash>"
 ```bash
 # 1. Remove from caps.toml entirely
 # 2. Run: mix capability.remove <name>
-#    This iterates all active tenants, archives their <name>_* tables,
+#    This iterates all active partitions, archives their <name>_* tables,
 #    verifies no dependents, then removes the OTP app from the build
 # 3. Commit with message: "cap(remove): <name>_cap [bd-<hash>]"
 ```
 
-The capability tables are **archived per-tenant schema, not deleted** for 90 days.
+The capability tables are **archived per-partition schema, not deleted** for 90 days.
 `mix capability.purge <name>` permanently drops them after the retention period
-across all tenant schemas simultaneously.
+across all partition schemas simultaneously.
 
 ---
 
@@ -190,54 +191,50 @@ across all tenant schemas simultaneously.
 The kernel is **frozen**. Its public API surface is:
 
 ```elixir
-# Starting/stopping (used by CapabilityWatcher in dev, CapabilitySupervisor in prod)
+# Starting/stopping capabilities (CapabilityWatcher in dev, CapabilitySupervisor in prod)
 CapabilityRegistry.start_capability(name :: atom) :: :ok | {:error, term}
 CapabilityRegistry.stop_capability(name :: atom) :: :ok | {:error, :has_dependents}
 CapabilityRegistry.active_capabilities() :: [atom]
 
-# Storage — always tenant-scoped in production (capabilities MUST use this, never raw Ecto)
-CapabilityStorage.repo(cap_name :: atom, tenant_id :: String.t()) :: Ecto.Repo.t()
+# Storage — always partition-scoped (capabilities MUST use this, never raw Ecto)
+CapabilityStorage.repo(cap_name :: atom, partition_id :: String.t()) :: Ecto.Repo.t()
 CapabilityStorage.namespace(cap_name :: atom) :: String.t()
-# Returns the Ecto prefix for this tenant: "tenant_<id>"
-CapabilityStorage.prefix(tenant_id :: String.t()) :: String.t()
+CapabilityStorage.prefix(partition_id :: String.t()) :: String.t()
+# Multi-partition read (cross-country queries — read-only enforced by kernel)
+CapabilityStorage.query(cap_name :: atom, partitions :: [String.t()], opts :: keyword)
+  :: Ecto.Query.t()
 
-# Tenant capability registry
-TenantCapabilityRegistry.active_for(tenant_id :: String.t()) :: [atom]
-TenantCapabilityRegistry.activate(tenant_id :: String.t(), cap :: atom, opts :: keyword) :: :ok | {:error, :not_in_caps_lock}
-TenantCapabilityRegistry.deactivate(tenant_id :: String.t(), cap :: atom) :: :ok
-TenantCapabilityRegistry.capable?(tenant_id :: String.t(), cap :: atom) :: boolean
+# Grant registry — three-axis model: principal × [partitions] × capabilities
+GrantRegistry.grants_for(principal_id :: String.t()) :: [Grant.t()]
+GrantRegistry.authorize(principal_id :: String.t(), cap :: atom, action :: atom,
+  partition_id :: String.t()) :: :allow | {:deny, reason :: atom}
+GrantRegistry.grant(principal_id :: String.t(), cap :: atom, partitions :: [String.t()],
+  permissions :: [atom], opts :: keyword) :: :ok | {:error, :not_in_caps_lock}
+GrantRegistry.revoke(principal_id :: String.t(), cap :: atom,
+  partitions :: [String.t()]) :: :ok
+GrantRegistry.expire_grants() :: :ok   # called by scheduler — revokes past valid_until
 
-# Tenant provisioning (creates / archives PostgreSQL schema for tenant)
-TenantProvisioner.provision(tenant_id :: String.t(), capabilities :: [atom]) :: :ok
-TenantProvisioner.deprovision(tenant_id :: String.t(), opts :: keyword) :: :ok | {:error, :confirmation_required | :has_active_data}
+# Partition provisioning (creates/archives PostgreSQL schemas)
+PartitionProvisioner.provision(partition_id :: String.t(), caps :: [atom]) :: :ok
+PartitionProvisioner.deprovision(partition_id :: String.t()) :: :ok | {:error, :has_active_data}
+PartitionProvisioner.prefix(partition_id :: String.t()) :: String.t()
 
-# Cross-capability messaging (no direct module calls between capabilities)
-CapabilityBus.emit(cap_name :: atom, event :: atom, payload :: map, tenant_id :: String.t()) :: :ok
-CapabilityBus.subscribe(cap_name :: atom, event :: atom) :: :ok
+# Principal resolution
+Principal.resolve(conn :: Plug.Conn.t()) :: {:ok, Principal.t()} | {:error, :unauthenticated}
+Principal.type(principal :: Principal.t()) :: :user | :local_team | :regional_team
+  | :project_team | :service_account | :hq
 
-# Configuration and secrets
-CapabilityConfig.register(cap_name :: atom, defaults :: map) :: :ok
-CapabilityConfig.get(cap_name :: atom) :: map
-CapabilityConfig.get(cap_name :: atom, tenant_id :: String.t()) :: map
-SecretsApi.get(cap_name :: atom, key :: atom) :: {:ok, term} | {:error, term}
-
-# Compliance
-DataDeletion.execute(tenant_id :: String.t(), user_id :: String.t()) :: {:ok, map} | {:error, term}
-
-defmodule CapabilityCompliance do
-  @callback delete_user_data(tenant_id :: String.t(), user_id :: String.t())
-    :: {:ok, non_neg_integer()} | {:error, term}
-
-  @callback export_user_data(tenant_id :: String.t(), user_id :: String.t())
-    :: {:ok, map()} | {:error, term}
-end
+# Cross-capability messaging — always includes partition context
+CapabilityBus.emit(cap :: atom, event :: atom, payload :: map,
+  partition_id :: String.t()) :: :ok
+CapabilityBus.subscribe(cap :: atom, event :: atom) :: :ok
 ```
 
 **What the kernel MUST NOT contain:**
 - HTTP handlers
 - Business logic of any kind
 - Domain schemas
-- Direct capability-domain database queries
+- Direct database queries
 - Any `import` of a capability module
 
 If you are about to add something to the kernel that is not in the list above,
@@ -249,27 +246,31 @@ stop and create a Beads issue with `type: arch-change`.
 
 ### 4.1 Namespace isolation
 
-Storage has **two dimensions**: capability namespace and tenant schema.
+Storage has **two dimensions**: capability namespace and partition schema.
 These are orthogonal — never conflate them.
 
 ```
-PostgreSQL schema:  tenant_<tenant_id>          ← tenant isolation (row of the matrix)
-Table prefix:       <capability_name>_<table>   ← capability isolation (column of the matrix)
+PostgreSQL schema:  partition_<partition_id>       ← partition isolation
+Table prefix:       <capability_name>_<table>      ← capability isolation
 
-Full address:  tenant_abc.billing_invoices
-               └─────────┘ └─────────────┘
-               tenant schema  cap namespace
+Full address:  partition_sk.billing_invoices
+               └──────────┘ └──────────────┘
+               partition      cap namespace
 ```
 
+A **partition** is a data isolation boundary — typically a legal entity or country.
+It is NOT the same as a principal (who is acting) or a grant (what they can do).
+
 Every capability owns exactly one table prefix: the capability name without `_cap`.
-Example: `billing_cap` owns prefix `billing_` within whatever tenant schema is active.
+Example: `billing_cap` owns prefix `billing_` within whatever partition schema is active.
 
 **Never** create a table without the capability prefix.
 **Never** `JOIN` across capability prefixes directly — use `CapabilityBus` events or
 define a read-only projection in the consuming capability's own tables.
-**Never** `JOIN` across tenant schemas — this is a hard isolation boundary.
+**Never** `JOIN` across partition schemas in application code — use
+`CapabilityStorage.query/3` which enforces read-only and grant validation.
 
-Table naming convention (within a tenant schema):
+Table naming convention (within a partition schema):
 ```
 billing_invoices
 billing_line_items
@@ -279,24 +280,23 @@ billing_payment_methods
 ### 4.2 Migrations
 
 - Migrations live in `capabilities/<name>_cap/priv/migrations/`
-- Run per-capability across all tenant schemas: `mix capabilities.migrate <name>`
+- Run per-capability across all partition schemas: `mix capabilities.migrate <name>`
 - Each migration must implement both `up` and `down`
-- Migrations are tenant-schema-agnostic — they define tables, not schemas
-- `TenantProvisioner.provision/2` runs pending migrations for a tenant at onboarding
-- Capability removal archives the namespace via `mix capability.remove <name>`;
-  ordinary migration rollback should undo only the objects created by that migration
+- Migrations are partition-schema-agnostic — they define tables, not schemas
+- `PartitionProvisioner.provision/2` runs pending migrations for a partition at onboarding
+- `down` for the initial migration must call `CapabilityStorage.archive_namespace/2`
 
 Migration template:
 ```elixir
 defmodule BillingCap.Repo.Migrations.CreateInvoices do
   use Ecto.Migration
 
-  # No schema/prefix here — the migration runner applies it per tenant
+  # No schema/prefix here — the migration runner applies it per partition
   def up do
     create table(:billing_invoices, primary_key: false) do
-      add :id,          :binary_id, primary_key: true
-      add :tenant_id,   :string,    null: false  # denormalized for audit queries
-      add :amount,      :decimal,   null: false
+      add :id,           :binary_id, primary_key: true
+      add :partition_id, :string,    null: false  # denormalized for audit queries
+      add :amount,       :decimal,   null: false
       timestamps()
     end
   end
@@ -311,8 +311,8 @@ end
 
 | Environment | Storage backend |
 |-------------|----------------|
-| dev / test  | PostgreSQL, namespaces created on `Application.start` |
-| prod        | PostgreSQL, namespaces created during CI migration step |
+| dev / test  | PostgreSQL, partition schemas created on `PartitionProvisioner.provision/2` |
+| prod        | PostgreSQL, partition schemas created during CI migration step |
 
 Never use ETS as primary storage. ETS is allowed for ephemeral caches within
 a capability's own supervisor subtree only.
@@ -351,7 +351,7 @@ deprecated = false
 
 **Rules:**
 - Only humans and CI may edit `caps.toml`.
-- Agents may READ `caps.toml` to understand current surface.
+- AI agents may READ `caps.toml` to understand current surface.
 - Agents must NEVER write to `caps.toml` directly.
   All manifest changes go through a Beads issue → human review → commit.
 
@@ -409,29 +409,10 @@ a corresponding Beads issue.
 | `cap-remove`  | Removing or deprecating a capability |
 | `cap-reuse`   | Upgrading a capability version (e.g. auth_cap v2→v3) |
 | `arch-change` | Modifying this AGENTS.md or kernel API |
-| `compliance`  | Documenting legal hold, deletion, export, or privacy exceptions |
 | `bug`         | Standard bug within a capability |
 | `task`        | Development task within a capability |
 
 ### 7.2 Commit message convention
-
-Use semantic commit format for every commit:
-
-```
-<type>(<scope>): <short imperative summary> [bd-<hash>]
-```
-
-Rules:
-- `type` describes the intent: `feat`, `fix`, `test`, `docs`, `refactor`,
-  `chore`, `cap`, or `arch`.
-- `scope` names the affected capability or subsystem, e.g. `billing_cap`,
-  `kernel`, `infra`, or `docs`.
-- Use imperative mood in the summary, e.g. "handle nil invoice date".
-- Keep the first line concise, ideally 72 characters or less.
-- Add a blank line and body when the reason, risk, migration, or rollback path
-  is not obvious from the summary.
-- Include a Beads reference when the change is tied to a Beads issue. Capability
-  state changes MUST include it.
 
 All commits that change capability state MUST reference the Beads issue:
 
@@ -444,9 +425,78 @@ arch: update kernel storage API [bd-xxxx]
 fix(billing_cap): handle nil invoice date [bd-yyyy]
 ```
 
-### 7.3 Agent workflow
+### 7.3 Changeset size limit — HARD RULE
 
-When an agent works on a task:
+**Every commit MUST change ≤ 100 lines of non-generated code.**
+
+This is a hard rule, not a guideline. It applies to all agents and humans.
+CI rejects any commit that exceeds this limit via `mix capabilities.diffcheck`.
+
+The reasoning: a 100-line diff is fully reviewable in under 5 minutes by a
+human or another agent. A 500-line diff is not reviewed — it is rubber-stamped.
+Over a multi-year system this compounds: unreviewed changes are where
+architectural drift, security issues, and silent regressions hide.
+
+**What counts toward the 100-line limit:**
+- All `.ex`, `.exs`, `.rs`, `.tf`, `.toml`, `.yml` changes
+- New files count as their full line count
+- Moved code counts as deleted + added (two separate commits if > 100 lines)
+
+**What does NOT count:**
+- Generated files (`caps.lock`, migration timestamps, `_build/`)
+- `priv/migrations/` schema dumps (auto-generated by Ecto)
+- Lockfiles (`mix.lock`, `Cargo.lock`)
+- Test fixture files under `test/fixtures/`
+
+**How agents MUST decompose work:**
+
+A task that requires 400 lines of change = minimum 4 commits, each with a
+clear single reason to exist. Agents must plan the decomposition BEFORE
+writing any code:
+
+```
+# WRONG — one commit, 380 lines
+"implement billing_cap invoice creation"
+
+# RIGHT — four commits, each ≤ 100 lines
+1. "feat(billing_cap): add Invoice schema and migration [bd-c3d4]"      (~60 lines)
+2. "feat(billing_cap): add InvoiceRepo CRUD functions [bd-c3d4]"        (~80 lines)
+3. "feat(billing_cap): add create_invoice business logic [bd-c3d4]"     (~70 lines)
+4. "test(billing_cap): invoice creation happy + error paths [bd-c3d4]"  (~90 lines)
+```
+
+Each commit must pass the full CI suite independently — not just the final one.
+A commit that only works when followed by the next commit is invalid.
+
+**Zdroj tohto pravidla:**
+Google Engineering Practices — Small CLs:
+`https://google.github.io/eng-practices/review/developer/small-cls.html`
+
+> "100 lines is usually a reasonable size for a CL, and 1000 lines is usually
+> too large, but it's up to the judgment of your reviewer."
+
+Google to definuje ako guideline závislý od reviewera. My to definujeme ako
+**hard rule vynútený CI** — pretože reviewer je často ďalší LLM agent ktorý
+nemá kapacitu odmietnuť veľký changeset. Preto mechanická hranica namiesto
+úsudku.
+
+**Exceptions require explicit human approval:**
+
+The only valid exceptions are:
+- Initial capability scaffold (`mix capability.new`) — generated boilerplate
+- Bulk rename / module restructure — must be a pure move, zero logic change
+- Auto-generated GraphQL / OpenAPI schema files
+
+Exception commits MUST include `[no-diffcheck]` in the message and a
+human must have approved the exception via a Beads issue comment before push.
+
+```
+refactor(billing_cap): rename BillingCap.Inv → BillingCap.Invoice [bd-c3d4] [no-diffcheck]
+```
+
+### 7.4 Agent workflow
+
+When an AI agent works on a task:
 
 ```bash
 # 1. Check what is unblocked
@@ -465,6 +515,8 @@ Agents MUST NOT start work on a task that is not in `bd ready`.
 Agents MUST NOT modify `caps.toml` or `caps.lock`.
 Agents MUST NOT create Beads issues of type `cap-*` or `arch-change`
 — these require human intent.
+Agents MUST plan commit decomposition before writing code when a task
+exceeds 100 lines — see section 7.3.
 
 ---
 
@@ -494,11 +546,15 @@ A capability not in `caps.lock` is **not compiled into the binary**.
 
 ### 8.3 CI gates (all must pass before merge to main)
 
-1. `mix capabilities.check` — semver consistency
-2. `mix test` — full test suite including capability integration tests
-3. `mix capabilities.audit` — every capability in caps.toml has a valid Beads issue
-4. `mix dialyzer` — type checking
-5. `mix credo --strict` — style and code quality
+1. `mix capabilities.diffcheck` — **rejects commits > 100 lines** (hard rule, see 7.3)
+2. `mix capabilities.check` — semver consistency
+3. `mix test` — full test suite including capability integration tests
+4. `mix capabilities.audit` — every capability in caps.toml has a valid Beads issue
+5. `mix dialyzer` — type checking
+6. `mix credo --strict` — style and code quality
+
+Gates run in this order — `diffcheck` is first because it is cheapest to run
+and catches the most common agent mistake early.
 
 ---
 
@@ -551,7 +607,7 @@ CI fails below this threshold.
 
 ---
 
-## 10. What Agents May and May Not Do
+## 10. What AI Agents May and May Not Do
 
 ### Permitted without human approval
 - Implement tasks listed in `bd ready` within an existing capability
@@ -574,9 +630,12 @@ CI fails below this threshold.
 - Deleting migration files
 - Bypassing `CapabilityStorage` to access another capability's tables directly
 - Creating Beads issues of type `cap-add`, `cap-change`, `cap-remove`, `arch-change`
-- Writing directly to `tenant_capability_events` table
-- Calling `TenantProvisioner.deprovision/2` (destructive — human only)
-- Cross-tenant queries of any kind
+- Writing directly to `partition_events` or `grant_events` tables
+- Calling `PartitionProvisioner.deprovision/2` (destructive — human only)
+- Calling `GrantRegistry.grant/4` or `GrantRegistry.revoke/3` (operational — human only)
+- Cross-partition queries outside of `CapabilityStorage.query/3`
+- Committing > 100 lines of non-generated code in a single commit without
+  `[no-diffcheck]` and prior human approval (see section 7.3)
 
 ---
 
@@ -585,167 +644,339 @@ CI fails below this threshold.
 | Term | Definition |
 |------|-----------|
 | **capability** | A self-contained OTP Application representing one domain of functionality |
-| **kernel** | The immutable core: supervisor, registry, storage API, event bus, tenant layer, secrets API |
+| **kernel** | The immutable core: supervisor, registry, storage API, event bus, grant layer, partition layer |
 | **caps.toml** | Human-editable manifest declaring the active capability surface (system axis) |
 | **caps.lock** | CI-generated frozen snapshot used for production builds |
 | **capability namespace** | Table prefix owned by exactly one capability, e.g. `billing_` |
-| **tenant schema** | PostgreSQL schema isolating one tenant's data, e.g. `tenant_abc` |
-| **tenant capability** | The activation of a system capability for a specific tenant (tenant axis) |
-| **degrowth** | The deliberate, clean removal of a capability including its code, storage across all tenants, infra module, and intent record |
-| **Beads issue** | The unit of intent — records why a change was made, not just what |
+| **partition** | PostgreSQL schema isolating one data boundary (legal entity / country), e.g. `partition_sk` |
+| **principal** | Who is acting — user, local team, regional team, project team, service account, or HQ |
+| **grant** | The runtime intersection: `principal × [partitions] × capability × permissions × valid_until?` |
 | **system axis** | What capabilities exist in the binary (governed by caps.lock) |
-| **tenant axis** | Which capabilities a tenant has activated (governed by TenantCapabilityRegistry) |
-| **Gateway behaviour** | Elixir behaviour that abstracts an external service, enabling swap without touching capability logic |
+| **partition axis** | Data isolation boundaries provisioned in the system (governed by PartitionProvisioner) |
+| **principal axis** | Who can act and on which partitions (governed by GrantRegistry) |
+| **degrowth** | The deliberate, clean removal of a capability including its code, storage across all partitions, infra module, and intent record |
+| **Beads issue** | The unit of intent — records why a change was made, not just what |
+| **Gateway behaviour** | Elixir behaviour abstracting an external service, enabling swap without touching capability logic |
 | **event contract test** | Test in the consumer capability that validates the shape of events emitted by another capability |
 | **capability infra module** | Terraform module that provisions all cloud resources for one capability — applied on add, destroyed on remove |
+| **time-limited grant** | A grant with a `valid_until` timestamp — expires automatically, used for project teams |
 
 ---
 
-## 12. Multitenancy Rules
+## 12. Three-Axis Model — Partition, Principal, Grant
 
-Multitenancy introduces a **second, independent axis** on top of the capability lifecycle.
-The two axes must never be conflated:
+This system uses three independent axes. Conflating any two of them is an
+architectural error.
 
-| Axis | Governed by | Changed by | Audit in |
-|------|-------------|------------|----------|
-| system | `caps.lock` | CI build | git / caps.lock `[[removed]]` |
-| tenant | `TenantCapabilityRegistry` | runtime API | `tenant_capability_events` table |
+| Axis | What it represents | Governed by | Audit in |
+|------|--------------------|-------------|----------|
+| **system** | What capabilities exist in the binary | `caps.lock` | git history |
+| **partition** | Data isolation boundary (legal entity) | `PartitionProvisioner` | `partition_events` |
+| **principal** | Who is acting (user/team/project/service) | `GrantRegistry` | `grant_events` |
 
-### 12.1 Two-axis invariant
-
-A capability can be activated for a tenant **only if** it is present in `caps.lock`.
-`TenantCapabilityRegistry.activate/3` enforces this at the call site — it returns
-`{:error, :not_in_caps_lock}` if the capability is absent from the current build.
+A **grant** is the intersection: `principal × [partitions] × capability × permissions × valid_until?`
 
 ```
-caps.lock has billing_cap?  ──NO──→  cannot activate for any tenant
-        │
-       YES
-        │
-TenantCapabilityRegistry has billing_cap for tenant_abc? ──NO──→ 403 at guard
-        │
-       YES
-        │
-      request proceeds with prefix: "tenant_abc"
+caps.lock       partitions          principals
+(system axis)   (data axis)         (org axis)
+     │                │                  │
+     └────────────────┴──────────────────┘
+                       │
+                    grants
+             (runtime intersection)
 ```
 
-### 12.2 Tenant schema lifecycle
+### 12.1 Three-axis invariant
 
-**Provisioning a new tenant:**
-```elixir
-# Creates PostgreSQL schema + runs all migrations for activated capabilities
-TenantProvisioner.provision("tenant_abc", [:issues_cap, :billing_cap])
-# → CREATE SCHEMA tenant_abc
-# → runs issues_cap migrations in tenant_abc
-# → runs billing_cap migrations in tenant_abc
-# → inserts rows in TenantCapabilityRegistry
+Before any request proceeds, three checks must pass in order:
+
+```
+1. caps.lock includes the capability?      ──NO──→ 404 (capability does not exist)
+2. partition has capability provisioned?   ──NO──→ 503 (not available in this region)
+3. principal has grant for cap+partition?  ──NO──→ 403 (not authorised)
+                │
+               YES
+                │
+     request proceeds with partition prefix
 ```
 
-**Activating a capability for an existing tenant:**
-```elixir
-TenantCapabilityRegistry.activate("tenant_abc", :reporting_cap, plan: :pro)
-# → verifies :reporting_cap in caps.lock
-# → runs reporting_cap pending migrations in schema tenant_abc
-# → inserts row in tenant_capability_events (audit)
-```
+### 12.2 Principal types
 
-**Deactivating a capability for a tenant (data retained):**
-```elixir
-TenantCapabilityRegistry.deactivate("tenant_abc", :reporting_cap)
-# → marks inactive in registry (data in tenant_abc.reporting_* untouched)
-# → inserts row in tenant_capability_events (audit)
-# → TenantCapabilityGuard starts returning 403 for reporting routes
-```
-
-**Deprovisioning a tenant entirely:**
-```elixir
-TenantProvisioner.deprovision("tenant_abc", confirm: true)
-# → requires explicit confirmation flag
-# → archives schema tenant_abc → tenant_abc_archived_<timestamp>
-# → retention: 90 days, then DROP SCHEMA
-```
-
-### 12.3 TenantCapabilityGuard
-
-Every HTTP request passes through this plug. It is the **only** enforcement point —
-capabilities themselves must not contain tenant permission checks.
+Every actor in the system is a principal. Principals have types that determine
+their default grant scope:
 
 ```elixir
-defmodule MyApp.TenantCapabilityGuard do
+# kernel/lib/principal.ex
+@type principal_type ::
+  :user           # individual person — single or multiple partitions
+  | :local_team   # team scoped to one partition
+  | :regional_team  # team spanning a defined set of partitions
+  | :project_team   # temporary team with valid_until — any partition set
+  | :service_account  # automated process — capability-specific, no UI access
+  | :hq             # group-level, can be granted access to all partitions
+```
+
+Principal IDs follow a namespaced format:
+```
+user:lucia_novak_sk
+team:sk_sales
+team:ce_finance
+project:gdpr_2026
+service:sap_sync_worker_de
+hq:group_reporting
+```
+
+### 12.3 Grant structure
+
+```elixir
+# kernel/lib/grant_registry.ex
+defmodule Grant do
+  @type t :: %__MODULE__{
+    id:           String.t(),
+    principal_id: String.t(),
+    capability:   atom,
+    partitions:   [String.t()] | :all,   # :all = every provisioned partition
+    permissions:  [atom],                 # e.g. [:read, :write] or [:audit]
+    valid_until:  DateTime.t() | nil,     # nil = permanent
+    granted_by:   String.t(),             # principal_id of granter
+    beads_ref:    String.t() | nil,       # optional Beads issue ref
+    inserted_at:  DateTime.t()
+  }
+end
+```
+
+**Grant examples matching the org structure:**
+
+```elixir
+# Local user — Lucia in SK
+GrantRegistry.grant("user:lucia_novak_sk", :crm_cap,
+  partitions: ["sk"],
+  permissions: [:read, :write],
+  granted_by: "hq:group_admin"
+)
+
+GrantRegistry.grant("user:lucia_novak_sk", :invoicing_cap,
+  partitions: ["sk"],
+  permissions: [:issue, :void],
+  granted_by: "hq:group_admin"
+)
+
+# Regional team — CE finance reads billing across PL and DE
+GrantRegistry.grant("team:ce_finance", :billing_cap,
+  partitions: ["pl", "de"],
+  permissions: [:read, :export],
+  granted_by: "hq:group_admin"
+)
+
+GrantRegistry.grant("team:ce_finance", :reporting_cap,
+  partitions: ["group"],
+  permissions: [:view],
+  granted_by: "hq:group_admin"
+)
+
+# Time-limited project team — expires automatically
+GrantRegistry.grant("project:gdpr_2026", :compliance_cap,
+  partitions: :all,
+  permissions: [:audit],
+  valid_until: ~U[2026-12-31 23:59:59Z],
+  granted_by: "hq:group_admin",
+  beads_ref: "bd-gdpr26"
+)
+
+# Service account — SAP sync worker, single partition, single capability
+GrantRegistry.grant("service:sap_sync_de", :accounting_cap,
+  partitions: ["de"],
+  permissions: [:sync],
+  granted_by: "hq:group_admin"
+)
+```
+
+### 12.4 GrantGuard
+
+Every HTTP request passes through `GrantGuard`. It is the **only** enforcement
+point — capabilities themselves must never contain authorization checks.
+
+```elixir
+defmodule MyApp.GrantGuard do
   import Plug.Conn
 
   def call(conn, _opts) do
-    tenant_id = conn.assigns.tenant_id
-    capability = conn.assigns.capability   # set by router
-
-    if TenantCapabilityRegistry.capable?(tenant_id, capability) do
+    with {:ok, principal}  <- Principal.resolve(conn),
+         partition_id      <- conn.assigns.partition_id,
+         capability        <- conn.assigns.capability,
+         action            <- conn.assigns.action,
+         :allow            <- GrantRegistry.authorize(principal.id, capability,
+                               action, partition_id) do
       conn
-      |> assign(:storage_prefix, CapabilityStorage.prefix(tenant_id))
+      |> assign(:principal, principal)
+      |> assign(:storage_prefix, PartitionProvisioner.prefix(partition_id))
     else
-      conn |> send_resp(403, "capability not active for this tenant") |> halt()
+      {:error, :unauthenticated}    -> conn |> send_resp(401, "unauthenticated") |> halt()
+      {:deny, :no_capability}       -> conn |> send_resp(404, "not found") |> halt()
+      {:deny, :not_provisioned}     -> conn |> send_resp(503, "not available") |> halt()
+      {:deny, :no_grant}            -> conn |> send_resp(403, "forbidden") |> halt()
+      {:deny, :grant_expired}       -> conn |> send_resp(403, "grant expired") |> halt()
     end
   end
 end
 ```
 
-The `tenant_id` assign is passed into every `CapabilityStorage.repo/2` call.
-The `:storage_prefix` assign is used for Ecto queries. Capabilities receive both
-from the connection — they never look up tenant routing themselves.
+The `:storage_prefix` and `:principal` assigns are passed into every capability
+call. Capabilities receive context from the connection — they never resolve it.
 
-### 12.4 Tenant capability events (audit table)
+### 12.5 Multi-partition queries
 
-All changes to tenant capability state are written to a single append-only table
-in the `public` schema (not in any tenant schema):
+Cross-partition reads (e.g. HQ reporting across all countries) use
+`CapabilityStorage.query/3`. The kernel enforces that multi-partition queries
+are always read-only.
+
+```elixir
+# In reporting_cap — HQ wants invoices across PL and DE
+def cross_country_summary(principal, partitions) do
+  CapabilityStorage.query(:billing_cap, partitions,
+    filter: [status: :paid],
+    read_only: true           # kernel enforces this — no write possible
+  )
+  |> Repo.all()
+end
+```
+
+The kernel builds a UNION query across partition schemas automatically:
+```sql
+SELECT * FROM partition_pl.billing_invoices WHERE status = 'paid'
+UNION ALL
+SELECT * FROM partition_de.billing_invoices WHERE status = 'paid'
+```
+
+### 12.6 Partition lifecycle
+
+**Provisioning a new partition (e.g. new country entity):**
+```elixir
+PartitionProvisioner.provision("hu", [:crm_cap, :invoicing_cap, :local_tax_cap])
+# → verifies each cap is in caps.lock
+# → CREATE SCHEMA partition_hu
+# → runs migrations for each cap in partition_hu
+# → inserts row in partition_events (audit)
+```
+
+**Activating a capability in an existing partition:**
+```elixir
+PartitionProvisioner.add_capability("sk", :reporting_cap)
+# → verifies :reporting_cap in caps.lock
+# → runs pending migrations in partition_sk
+# → inserts row in partition_events
+```
+
+**Deprovisioning a partition (requires explicit confirm):**
+```elixir
+PartitionProvisioner.deprovision("hu", confirm: true)
+# → archives schema partition_hu → partition_hu_archived_<timestamp>
+# → revokes all grants targeting partition "hu"
+# → retention: 90 days, then DROP SCHEMA
+# → inserts row in partition_events
+```
+
+### 12.7 Audit tables
+
+Two append-only tables in the `public` schema record all state changes:
 
 ```sql
-CREATE TABLE tenant_capability_events (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     text        NOT NULL,
-  capability    text        NOT NULL,
-  event         text        NOT NULL,  -- 'activated' | 'deactivated' | 'provisioned' | 'deprovisioned'
-  plan          text,
-  actor_id      text,                  -- user or agent that triggered the change
-  beads_ref     text,                  -- optional Beads issue reference
-  inserted_at   timestamptz NOT NULL DEFAULT now()
+-- Partition lifecycle audit
+CREATE TABLE partition_events (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  partition_id text        NOT NULL,
+  capability   text,
+  event        text        NOT NULL,  -- 'provisioned' | 'cap_added' | 'deprovisioned'
+  actor_id     text,
+  inserted_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Grant lifecycle audit
+CREATE TABLE grant_events (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  principal_id text        NOT NULL,
+  capability   text        NOT NULL,
+  partitions   text[]      NOT NULL,
+  permissions  text[]      NOT NULL,
+  event        text        NOT NULL,  -- 'granted' | 'revoked' | 'expired'
+  valid_until  timestamptz,
+  granted_by   text,
+  beads_ref    text,
+  inserted_at  timestamptz NOT NULL DEFAULT now()
 );
 ```
 
-This table is **never updated, never deleted from**. It is the permanent record
-of every capability state change per tenant. Agents must never write to it directly —
-only kernel functions write to it.
+Both tables are **never updated, never deleted from**. Agents must never
+write to them directly — only kernel functions write to them.
 
-### 12.5 Multitenancy and Beads
+### 12.8 Time-limited grants
 
-Tenant-level capability changes (activate/deactivate for a specific tenant) do **not**
-require a Beads issue — they are operational, not architectural.
+Project teams and temporary access use `valid_until`. The kernel runs an
+expiry job every 5 minutes:
 
-Beads issues are required when:
-- Adding a new capability to `caps.toml` (which then becomes available to tenants)
-- Removing a capability from `caps.toml` (which forces deactivation for all tenants)
-- Changing how `TenantCapabilityGuard` or `TenantProvisioner` work (`arch-change`)
-
-### 12.6 Dev / test multitenancy
-
-In development, `MIX_ENV=dev` creates two fixed tenant schemas automatically:
-`tenant_dev_a` and `tenant_dev_b` with all active capabilities provisioned.
-
-In tests, use `TenantCase`:
 ```elixir
-defmodule MyApp.TenantCase do
-  use ExUnit.CaseTemplate
+# Scheduled via Oban
+defmodule Kernel.GrantExpiryWorker do
+  use Oban.Worker, queue: :default
 
-  setup do
-    tenant_id = "tenant_test_#{System.unique_integer([:positive])}"
-    caps = CapabilityRegistry.active_capabilities()
-    TenantProvisioner.provision(tenant_id, caps)
-    on_exit(fn -> TenantProvisioner.deprovision(tenant_id, confirm: true) end)
-    {:ok, tenant_id: tenant_id}
+  def perform(_job) do
+    GrantRegistry.expire_grants()
+    # → finds grants where valid_until < now()
+    # → marks them :expired in grant_events
+    # → GrantRegistry.authorize/4 returns {:deny, :grant_expired} immediately
+    :ok
   end
 end
 ```
 
-Never use a fixed tenant ID in tests — always generate unique IDs to allow
-concurrent test runs without schema conflicts.
+No manual intervention needed. When `project:gdpr_2026` reaches
+`2026-12-31 23:59:59Z`, all its grants expire automatically and every
+subsequent request returns 403.
+
+### 12.9 Three-axis model and Beads
+
+Grant operations (grant/revoke for a specific principal) do **not** require
+a Beads issue — they are operational.
+
+Partition provisioning and deprovisioning do **not** require a Beads issue —
+they are operational.
+
+Beads issues (`arch-change`) are required only when:
+- Changing the `GrantRegistry` or `GrantGuard` kernel API
+- Changing the `PartitionProvisioner` lifecycle
+- Changing the `Principal` type enum
+- Adding a new permission type to the system-wide permission vocabulary
+
+### 12.10 Dev / test setup
+
+In development, two fixed partitions are created automatically:
+`partition_dev_a` and `partition_dev_b`.
+
+In tests, generate unique partition and principal IDs:
+
+```elixir
+defmodule MyApp.GrantCase do
+  use ExUnit.CaseTemplate
+
+  setup do
+    partition_id = "partition_test_#{System.unique_integer([:positive])}"
+    principal_id = "user:test_#{System.unique_integer([:positive])}"
+    caps = CapabilityRegistry.active_capabilities()
+
+    PartitionProvisioner.provision(partition_id, caps)
+    GrantRegistry.grant(principal_id, :all, partitions: [partition_id],
+      permissions: [:read, :write], granted_by: "system:test")
+
+    on_exit(fn ->
+      PartitionProvisioner.deprovision(partition_id, confirm: true)
+    end)
+
+    {:ok, partition_id: partition_id, principal_id: principal_id}
+  end
+end
+```
+
+Never use fixed IDs in tests — concurrent test runs will collide on schemas.
 
 ---
 
@@ -840,19 +1071,14 @@ defmodule BillingCap.Gateways.Stub do
 end
 ```
 
-**CapabilityConfig selects the implementation:**
+**Config selects the implementation:**
 ```elixir
-# capabilities/billing_cap/lib/billing_cap/application.ex
-CapabilityConfig.register(:billing_cap, %{
-  payment_gateway: BillingCap.Gateways.Stub
-})
+# config/config.exs
+config :billing_cap, :payment_gateway, BillingCap.Gateways.Stub
 
-# Capability code reads the merged config instead of Application.get_env/2.
-gateway = CapabilityConfig.get(:billing_cap) |> Map.fetch!(:payment_gateway)
+# config/prod.exs
+config :billing_cap, :payment_gateway, BillingCap.Gateways.Stripe
 ```
-
-Production configuration sets `:payment_gateway` to `BillingCap.Gateways.Stripe`
-through the kernel-managed capability config layer.
 
 When the external provider changes their API, only the `Stripe` module changes.
 The capability business logic, the event schema, and the tests are untouched.
@@ -880,7 +1106,7 @@ in the test pipeline. If `down` raises or is not implemented, the build fails.
 ```bash
 # Before deploying to prod:
 mix ecto.migrate                    # apply migrations
-mix capabilities.smoke_test         # run smoke tests against the staging instance
+mix capabilities.smoke_test         # run smoke tests against staging
 
 # If smoke tests fail — rollback:
 mix ecto.rollback --step 1          # per-capability rollback available
@@ -946,8 +1172,7 @@ Capabilities do not configure their own exporters.
 2. Storage namespace size over time
 3. Event bus: emitted vs consumed events per minute
 
-**Health check endpoint** — the HTTP boundary exposes `/health/capabilities`
-using capability health data provided by the kernel:
+**Health check endpoint** — kernel exposes `/health/capabilities` returning:
 ```json
 {
   "billing_cap": { "status": "ok",      "latency_p99_ms": 12 },
@@ -988,9 +1213,8 @@ def start(_type, _args) do
 end
 ```
 
-**Application secrets** are never in config files, environment variables in
-source control, or Docker images. They are fetched at runtime from the secrets
-backend:
+**Secrets** are never in config files, environment variables in source control,
+or Container images. They are fetched at runtime from the secrets backend:
 
 ```elixir
 # kernel/lib/secrets_api.ex
@@ -998,9 +1222,6 @@ SecretsApi.get(:billing_cap, :stripe_secret_key)
 # → fetches from Vault (local) or cloud secrets manager (prod)
 # → cached in memory with TTL, auto-rotated
 ```
-
-Disposable local bootstrap tokens for services like the Vault dev server are
-not application secrets and must not be reused outside local development.
 
 **Rules:**
 - Never call `System.get_env/1` in capability code. Use `SecretsApi.get/2` or
@@ -1012,9 +1233,8 @@ not application secrets and must not be reused outside local development.
 
 ### 13.6 Data deletion and GDPR compliance
 
-Every capability MUST implement the `CapabilityCompliance` behaviour so the
-kernel can confirm compliance uniformly. Capabilities that do not store personal
-data return `{:ok, 0}` for deletion and an empty export map:
+Every capability that stores personal data MUST implement the
+`CapabilityCompliance` behaviour:
 
 ```elixir
 defmodule CapabilityCompliance do
@@ -1062,24 +1282,24 @@ stack can run locally without external dependencies.
 ### 14.1 Two-environment model
 
 ```
-local      → Docker Compose, mirrors prod topology exactly
+local      → Podman Compose, mirrors prod topology exactly
 production → Cloud provider via Terraform/OpenTofu (IaC)
 ```
 
-There is no third topology for staging. A staging instance uses the production
-IaC shape with different variables and may run a subset of capabilities from
-the same `caps.lock` as production.
+There is no separate "staging" environment. Staging parity is achieved via
+`caps.toml` — a staging instance runs a subset of capabilities from the same
+`caps.lock` as production.
 
 **The cardinal rule:** if it works locally, it works in prod.
 This is only possible if local = production topology at the service level.
 
 ### 14.2 Local development stack
 
-All local services are defined in `infra/local/docker-compose.yml`.
-Run with: `make dev` (alias for `docker compose -f infra/local/docker-compose.yml up`).
+All local services are defined in `infra/local/compose.yml`.
+Run with: `make dev` (alias for `podman compose -f infra/local/compose.yml up`).
 
 ```yaml
-# infra/local/docker-compose.yml
+# infra/local/compose.yml
 services:
 
   postgres:
@@ -1146,7 +1366,7 @@ The app code never knows which environment it runs in — it always talks to
 ```
 infra/
 ├── local/
-│   ├── docker-compose.yml
+│   ├── compose.yml
 │   ├── prometheus.yml
 │   └── grafana/
 │       └── dashboards/          ← auto-provisioned from capability templates
@@ -1171,8 +1391,8 @@ infra/
 
 **Makefile targets:**
 ```makefile
-dev:         docker compose -f local/docker-compose.yml up
-dev-down:    docker compose -f local/docker-compose.yml down -v
+dev:         podman compose -f local/compose.yml up
+dev-down:    podman compose -f local/compose.yml down -v
 plan-prod:   cd envs/prod && tofu plan
 apply-prod:  cd envs/prod && tofu apply
 destroy-cap: cd envs/prod && tofu destroy -target=module.$(CAP)_infra
@@ -1276,9 +1496,10 @@ Capabilities must not cache secrets beyond one request.
 ### 14.7 Container and release strategy
 
 The app is released as an OTP release (not a Mix project) inside a minimal
-Docker image:
+container image. Build file is named `Containerfile` (Podman native format,
+compatible with any OCI-compliant builder):
 
-```dockerfile
+```containerfile
 # Multi-stage build
 FROM elixir:1.17-otp-27-alpine AS builder
 WORKDIR /app
@@ -1303,7 +1524,7 @@ registry/app:<git_sha>-<caps_lock_sha>
 
 Both SHAs are in the tag — `git_sha` identifies the code, `caps_lock_sha`
 identifies the capability set. A rollback to the previous binary is
-`docker pull registry/app:<previous_git_sha>-<previous_caps_lock_sha>`.
+`podman pull registry/app:<previous_git_sha>-<previous_caps_lock_sha>`.
 
 **Never use `latest` in production.** Tags are immutable.
 
@@ -1311,7 +1532,7 @@ identifies the capability set. A rollback to the previous binary is
 
 Agents may:
 - Read any file in `infra/`
-- Modify `infra/local/docker-compose.yml` for local development needs
+- Modify `infra/local/compose.yml` for local development needs
 - Add dashboard templates in `infra/local/grafana/dashboards/`
 - Modify `infra/modules/capability-infra/<name>/` for the capability they
   are currently implementing (must be in `bd ready`)
@@ -1324,7 +1545,7 @@ Agents must never:
 
 ---
 
-*Document version: 1.0.0*
-*Last arch-change: resilience rules + infrastructure [bd-rs01, bd-infra01]*
+*Document version: 1.5.0*
+*Last arch-change: docker→podman, Claude Code→AI agents [bd-infra02]*
 *Maintained by: human maintainers only*
 *Agents: read-only*
