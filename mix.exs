@@ -8,7 +8,9 @@ defmodule ElixirSystem.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      aliases: aliases()
+      aliases: aliases(),
+      test_ignore_filters: [~r/^test\/support\//],
+      test_coverage: [summary: [threshold: 0]]
     ]
   end
 

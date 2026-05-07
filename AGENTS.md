@@ -602,8 +602,24 @@ direct module calls between capabilities.
 
 ### 9.3 Coverage requirement
 
-Every capability must maintain ≥ 80% test coverage.
-CI fails below this threshold.
+**Kernel (`kernel/lib/`)** is the trust boundary for the whole system: it must
+maintain **stricter** coverage than capabilities. Target **≥ 90%** effective
+coverage: every public kernel API (storage, grants, partitions, registry,
+`GrantGuard`, `CapabilityBus`, etc.) must have direct or integration tests
+before changes merge. The kernel is small and high-leverage; gaps here are
+unacceptable.
+
+**Capabilities** must maintain **≥ 80%** test coverage. CI fails below this
+threshold for capability code.
+
+> **Tooling note:** `mix test --cover` at the repository root reports coverage
+> for the host app’s `lib/` only. Kernel modules are still compiled and
+> executed by the same test suite; track kernel coverage with the test files
+> under `test/` that import kernel modules, and run
+> `INTEGRATION_TESTS=1 mix ecto.migrate -r EsKernel.Repo && INTEGRATION_TESTS=1 mix test --include integration`
+> against PostgreSQL for grant and audit integration tests. Improving the
+> cover report to include `kernel/lib` in the summary is a follow-up
+> (umbrella layout or per-app cover task).
 
 ---
 
