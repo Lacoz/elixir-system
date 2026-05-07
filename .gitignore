@@ -7,6 +7,3 @@ erl_crash.dump
 # Legacy local DB junk
 .dolt/
 *.db
-
-# Legacy Beads workspace (removed — use ticket / `.tickets/` instead)
-.beads/

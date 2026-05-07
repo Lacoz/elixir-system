@@ -23,7 +23,7 @@ defmodule EsKernel.Repo.Migrations.CreateAuditTables do
       add(:event, :string, null: false)
       add(:valid_until, :utc_datetime_usec)
       add(:granted_by, :string)
-      add(:beads_ref, :string)
+      add(:ticket_ref, :string)
       add(:inserted_at, :utc_datetime_usec, default: fragment("timezone('utc', now())"), null: false)
     end
   end

@@ -5,10 +5,10 @@ kernel_min = "0.0.1"
 name = "issues_cap"
 version = "1.0.0"
 status = "active"
-ticket = "bd-test-kernel"
+ticket = "tk-test-kernel"
 
 [[capability]]
 name = "billing_cap"
 version = "0.1.0"
 status = "active"
-ticket = "bd-test-kernel"
+ticket = "tk-test-kernel"
